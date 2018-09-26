@@ -3,7 +3,6 @@ package nxusercheck
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"reflect"
 	"strings"
 
@@ -13,15 +12,15 @@ import (
 )
 
 type UsersCheck struct {
-	nexusConn        *nx.NexusConn
-	Prefix           string       `json:"prefix"`
-	OnlySubUsers     bool         `json:"onlySubUsers"`
-	Templates        []string     `json:"templates"`
-	TemplatesMatch   string       `json:"templatesMatch"`
-	Permissions      *Permissions `json:"permissions"`
-	PermissionsMatch string       `json:"permissionsMatch"`
-	Tags             *Tags        `json:"tags"`
-	TagsMatch        string       `json:"tagsMatch"`
+	nexusConn             *nx.NexusConn
+	Prefix                string       `json:"prefix"`
+	OnlySubUsers          bool         `json:"onlySubUsers"`
+	Templates             []string     `json:"templates"`
+	AllowExtraTemplates   bool         `json:"allowExtraTemplates"`
+	Permissions           *Permissions `json:"permissions"`
+	AllowExtraPermissions bool         `json:"allowExtraPermissions"`
+	Tags                  *Tags        `json:"tags"`
+	AllowExtraTags        bool         `json:"allowExtraTags"`
 
 	fullPermissions T
 	fullTags        T
@@ -42,13 +41,10 @@ type Tags struct {
 type T map[string]map[string]interface{}
 
 type CheckOpts struct {
-	TemplatesMatch   string
-	PermissionsMatch string
-	TagsMatch        string
-}
-
-type ApplyOpts struct {
-	Clean bool
+	apply                 bool
+	AllowExtraTemplates   bool
+	AllowExtraPermissions bool
+	AllowExtraTags        bool
 }
 
 func (uc *UsersCheck) Check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
@@ -59,71 +55,22 @@ func (uc *UsersCheck) Check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error)
 
 	uc.init(nc)
 
+	opt.apply = false
+
 	return uc.check(opt)
 }
 
-func (uc *UsersCheck) check(opts *CheckOpts) (error, error) {
-	listOpts := &nx.ListOpts{}
-	if !uc.OnlySubUsers {
-		listOpts.LimitByDepth = true
-		listOpts.Depth = 0
+func (uc *UsersCheck) Apply(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
+	opt := &CheckOpts{}
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
 
-	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
-	if err != nil {
-		return nil, err
-	}
+	uc.init(nc)
 
-	done := 0
-	for _, user := range users {
-		if uc.OnlySubUsers == (user.User != uc.Prefix) {
-			if err := uc.checkUser(&user, opts); err != nil {
-				return err, nil
-			}
-			done += 1
-		}
-	}
+	opt.apply = true
 
-	if done == 0 {
-		return fmt.Errorf("No users found on prefix %s", uc.Prefix), nil
-	}
-
-	return nil, nil
-}
-
-func (uc *UsersCheck) apply(opts *ApplyOpts) (bool, error) {
-	listOpts := &nx.ListOpts{}
-	if !uc.OnlySubUsers {
-		listOpts.LimitByDepth = true
-		listOpts.Depth = 0
-	}
-
-	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
-	if err != nil {
-		return false, err
-	}
-
-	if opts.Clean {
-		if uc.OnlySubUsers {
-			log.Printf("Delete %d users on prefix %s", len(users), uc.Prefix)
-		}
-		for _, user := range users {
-			if uc.OnlySubUsers == (user.User != uc.Prefix) {
-				if _, err = uc.nexusConn.UserDelete(user.User); err != nil {
-					return false, err
-				}
-				log.Printf("Deleted user %s", user.User)
-			}
-		}
-	}
-
-	for _, user := range users {
-		if uc.OnlySubUsers == (user.User != uc.Prefix) {
-			log.Printf("Here we should apply user %s", user.User)
-		}
-	}
-
-	return true, nil
+	return uc.check(opt)
 }
 
 func (uc *UsersCheck) init(nc *nx.NexusConn) {
@@ -160,77 +107,128 @@ func (uc *UsersCheck) init(nc *nx.NexusConn) {
 	}
 }
 
-func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) error {
-	templatesMatch := "yes"
-	if opts.TemplatesMatch != "" {
-		templatesMatch = opts.TemplatesMatch
-	} else if uc.TemplatesMatch != "" {
-		templatesMatch = uc.TemplatesMatch
+func (uc *UsersCheck) check(opts *CheckOpts) (error, error) {
+	listOpts := &nx.ListOpts{}
+	if !uc.OnlySubUsers {
+		listOpts.LimitByDepth = true
+		listOpts.Depth = 0
 	}
 
-	permissionsMatch := "yes"
-	if opts.PermissionsMatch != "" {
-		permissionsMatch = opts.PermissionsMatch
-	} else if uc.PermissionsMatch != "" {
-		permissionsMatch = uc.PermissionsMatch
+	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
+	if err != nil {
+		return nil, fmt.Errorf("Error listing users on %s: %s", uc.Prefix, err.Error())
 	}
 
-	tagsMatch := "yes"
-	if opts.TagsMatch != "" {
-		tagsMatch = opts.TagsMatch
-	} else if uc.TagsMatch != "" {
-		tagsMatch = uc.TagsMatch
+	checkErrs := []string{}
+
+	done := 0
+	for _, user := range users {
+		if uc.OnlySubUsers == (user.User != uc.Prefix) {
+			checkErr, applyErr := uc.checkUser(&user, opts)
+			if checkErr != nil {
+				checkErrs = append(checkErrs, checkErr.Error())
+			}
+			if opts.apply && applyErr != nil {
+				return fmt.Errorf(strings.Join(checkErrs, "\n")), applyErr
+			}
+			done++
+		}
 	}
 
+	if done == 0 {
+		return nil, fmt.Errorf("Error listing users on %s: no users found", uc.Prefix)
+	}
+
+	if len(checkErrs) != 0 {
+		return fmt.Errorf(strings.Join(checkErrs, "\n")), nil
+	}
+	return nil, nil
+}
+
+func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (error, error) {
 	// Check templates
-	errs := []string{}
+	var applyErr error
+	outs := []string{}
 
 	if uc.Templates != nil {
-		if templatesMatch == "order" {
-			if !checkTemplatesOrderMatch(userInfo.Templates, uc.Templates) {
-				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in order: %v", userInfo.Templates, uc.Templates))
-			}
-		} else if templatesMatch == "no" {
-			if missing, ok := checkTemplatesAnyOrder(userInfo.Templates, uc.Templates); !ok {
-				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in any order: %v\n\t* Missing: %v", userInfo.Templates, uc.Templates, missing))
+		if opts.AllowExtraTemplates || uc.AllowExtraTemplates {
+			if missing, ok := checkTemplatesOrderMatch(userInfo.Templates, uc.Templates); !ok {
+				outs = append(outs, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in order: %v\n", userInfo.Templates, uc.Templates))
+				if opts.apply {
+					if err := applyTemplates(uc.nexusConn, userInfo, append(userInfo.Templates, missing...)); err != nil {
+						applyErr = fmt.Errorf("Error applying templates to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		} else {
 			if !checkTemplatesExactMatch(userInfo.Templates, uc.Templates) {
-				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants exactly: %v", userInfo.Templates, uc.Templates))
+				outs = append(outs, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants exactly: %v\n", userInfo.Templates, uc.Templates))
+				if opts.apply {
+					if err := applyTemplates(uc.nexusConn, userInfo, uc.Templates); err != nil {
+						applyErr = fmt.Errorf("Error applying templates to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		}
+		/* missing, ok := checkTemplatesAnyOrder(userInfo.Templates, uc.Templates) */
 	}
 
 	// Check tags
 	if uc.Tags != nil {
-		if tagsMatch == "no" {
+		if opts.AllowExtraTags || uc.AllowExtraTags {
 			if wrong, missing, ok := checkTags(userInfo.Tags, uc.fullTags); !ok {
-				errs = append(errs, formatTagErrors(wrong, missing, nil))
+				outs = append(outs, formatTagErrors(wrong, missing, nil))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
+						applyErr = fmt.Errorf("Error applying tags to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		} else {
 			if wrong, missing, extra, ok := checkTagsExactMatch(userInfo.Tags, uc.fullTags); !ok {
-				errs = append(errs, formatTagErrors(wrong, missing, extra))
+				outs = append(outs, formatTagErrors(wrong, missing, extra))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, extra); err != nil {
+						applyErr = fmt.Errorf("Error applying tags to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		}
 	}
 
 	// Check perms
 	if uc.Permissions != nil {
-		if permissionsMatch == "no" {
+		if opts.AllowExtraPermissions || uc.AllowExtraPermissions {
 			if wrong, missing, ok := checkPerms(userInfo.Tags, uc.fullPermissions); !ok {
-				errs = append(errs, formatPermErrors(wrong, missing, nil))
+				outs = append(outs, formatPermErrors(wrong, missing, nil))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
+						applyErr = fmt.Errorf("Error applying permissions to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		} else {
 			if wrong, missing, extra, ok := checkPermsExactMatch(userInfo.Tags, uc.fullPermissions); !ok {
-				errs = append(errs, formatPermErrors(wrong, missing, extra))
+				outs = append(outs, formatPermErrors(wrong, missing, extra))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, extra); err != nil {
+						applyErr = fmt.Errorf("Error applying permissions to %s: %s", userInfo.User, err.Error())
+					}
+				}
 			}
 		}
 	}
 
-	if len(errs) != 0 {
-		return fmt.Errorf("%s has errors:\n\n%s", userInfo.User, strings.Join(errs, "\n"))
+	if len(outs) == 0 {
+		return nil, nil
+	} else if !opts.apply {
+		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), nil
+	} else if applyErr != nil {
+		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), applyErr
+	} else {
+		outs = append(outs, fmt.Sprintf("%s all errors fixed", userInfo.User))
+		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), nil
 	}
-	return nil
 }
 
 func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) string {
@@ -307,6 +305,53 @@ func formatPermErrors(wrong, missing, extra map[string]map[string]interface{}) s
 	return strings.Join(ls, "\n")
 }
 
+func applyTemplates(nc *nx.NexusConn, userInfo *nx.UserInfo, templates []string) error {
+	for _, tpl := range userInfo.Templates {
+		if _, err := nc.UserDelTemplate(userInfo.User, tpl); err != nil {
+			return err
+		}
+	}
+	for _, tpl := range templates {
+		if _, err := nc.UserAddTemplate(userInfo.User, tpl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyTags(nc *nx.NexusConn, userInfo *nx.UserInfo, wrong map[string]map[string]interface{}, missing map[string]map[string]interface{}, extra map[string]map[string]interface{}) error {
+	if wrong != nil {
+		for prefix, tagval := range wrong {
+			delTags := []string{}
+			for tag := range tagval {
+				delTags = append(delTags, tag)
+			}
+			if _, err := nc.UserDelTags(userInfo.User, prefix, delTags); err != nil {
+				return err
+			}
+		}
+	}
+	if extra != nil {
+		for prefix, tagval := range extra {
+			delTags := []string{}
+			for tag := range tagval {
+				delTags = append(delTags, tag)
+			}
+			if _, err := nc.UserDelTags(userInfo.User, prefix, delTags); err != nil {
+				return err
+			}
+		}
+	}
+	if missing != nil {
+		for prefix, tagval := range missing {
+			if _, err := nc.UserSetTags(userInfo.User, prefix, tagval); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func checkTemplatesExactMatch(has []string, wants []string) bool {
 	if len(has) != len(wants) {
 		return false
@@ -319,7 +364,7 @@ func checkTemplatesExactMatch(has []string, wants []string) bool {
 	return true
 }
 
-func checkTemplatesOrderMatch(has []string, wants []string) bool {
+func checkTemplatesOrderMatch(has []string, wants []string) ([]string, bool) {
 	i := 0
 	for _, tpl := range has {
 		if wants[i] == tpl {
@@ -327,9 +372,9 @@ func checkTemplatesOrderMatch(has []string, wants []string) bool {
 		}
 	}
 	if len(wants) != i {
-		return false
+		return wants[i:], false
 	}
-	return true
+	return nil, true
 }
 
 func checkTemplatesAnyOrder(has []string, wants []string) ([]string, bool) {
