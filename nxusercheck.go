@@ -1,6 +1,7 @@
 package nxusercheck
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"reflect"
@@ -12,12 +13,15 @@ import (
 )
 
 type UsersCheck struct {
-	nexusConn    *nx.NexusConn
-	User         string       `json:"user"`
-	OnlySubUsers bool         `json:"onlySubUsers"`
-	Templates    []string     `json:"templates"`
-	Permissions  *Permissions `json:"permissions"`
-	Tags         *Tags        `json:"tags"`
+	nexusConn        *nx.NexusConn
+	Prefix           string       `json:"prefix"`
+	OnlySubUsers     bool         `json:"onlySubUsers"`
+	Templates        []string     `json:"templates"`
+	TemplatesMatch   string       `json:"templatesMatch"`
+	Permissions      *Permissions `json:"permissions"`
+	PermissionsMatch string       `json:"permissionsMatch"`
+	Tags             *Tags        `json:"tags"`
+	TagsMatch        string       `json:"tagsMatch"`
 
 	fullPermissions T
 	fullTags        T
@@ -38,10 +42,9 @@ type Tags struct {
 type T map[string]map[string]interface{}
 
 type CheckOpts struct {
-	TemplatesExactMatch   bool
-	TemplatesOrderMatch   bool
-	TagsExactMatch        bool
-	PermissionsExactMatch bool
+	TemplatesMatch   string
+	PermissionsMatch string
+	TagsMatch        string
 }
 
 type ApplyOpts struct {
@@ -66,17 +69,23 @@ func (uc *UsersCheck) check(opts *CheckOpts) (error, error) {
 		listOpts.Depth = 0
 	}
 
-	users, err := uc.nexusConn.UserList(uc.User, 0, 0, listOpts)
+	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
+	done := 0
 	for _, user := range users {
-		if uc.OnlySubUsers == (user.User != uc.User) {
+		if uc.OnlySubUsers == (user.User != uc.Prefix) {
 			if err := uc.checkUser(&user, opts); err != nil {
 				return err, nil
 			}
+			done += 1
 		}
+	}
+
+	if done == 0 {
+		return fmt.Errorf("No users found on prefix %s", uc.Prefix), nil
 	}
 
 	return nil, nil
@@ -89,17 +98,17 @@ func (uc *UsersCheck) apply(opts *ApplyOpts) (bool, error) {
 		listOpts.Depth = 0
 	}
 
-	users, err := uc.nexusConn.UserList(uc.User, 0, 0, listOpts)
+	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
 	if err != nil {
 		return false, err
 	}
 
 	if opts.Clean {
 		if uc.OnlySubUsers {
-			log.Printf("Delete %d users on prefix %s", len(users), uc.User)
+			log.Printf("Delete %d users on prefix %s", len(users), uc.Prefix)
 		}
 		for _, user := range users {
-			if uc.OnlySubUsers == (user.User != uc.User) {
+			if uc.OnlySubUsers == (user.User != uc.Prefix) {
 				if _, err = uc.nexusConn.UserDelete(user.User); err != nil {
 					return false, err
 				}
@@ -109,7 +118,7 @@ func (uc *UsersCheck) apply(opts *ApplyOpts) (bool, error) {
 	}
 
 	for _, user := range users {
-		if uc.OnlySubUsers == (user.User != uc.User) {
+		if uc.OnlySubUsers == (user.User != uc.Prefix) {
 			log.Printf("Here we should apply user %s", user.User)
 		}
 	}
@@ -152,50 +161,150 @@ func (uc *UsersCheck) init(nc *nx.NexusConn) {
 }
 
 func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) error {
+	templatesMatch := "yes"
+	if opts.TemplatesMatch != "" {
+		templatesMatch = opts.TemplatesMatch
+	} else if uc.TemplatesMatch != "" {
+		templatesMatch = uc.TemplatesMatch
+	}
+
+	permissionsMatch := "yes"
+	if opts.PermissionsMatch != "" {
+		permissionsMatch = opts.PermissionsMatch
+	} else if uc.PermissionsMatch != "" {
+		permissionsMatch = uc.PermissionsMatch
+	}
+
+	tagsMatch := "yes"
+	if opts.TagsMatch != "" {
+		tagsMatch = opts.TagsMatch
+	} else if uc.TagsMatch != "" {
+		tagsMatch = uc.TagsMatch
+	}
+
 	// Check templates
+	errs := []string{}
+
 	if uc.Templates != nil {
-		if opts.TemplatesExactMatch {
-			if !checkTemplatesExactMatch(userInfo.Templates, uc.Templates) {
-				return fmt.Errorf("%s has incorrect templates:\n- Has:   %v\n+Wants exactly: %v", userInfo.User, userInfo.Templates, uc.Templates)
-			}
-		} else if opts.TemplatesOrderMatch {
+		if templatesMatch == "order" {
 			if !checkTemplatesOrderMatch(userInfo.Templates, uc.Templates) {
-				return fmt.Errorf("%s has incorrect templates:\n- Has:   %v\n+Wants in order: %v", userInfo.User, userInfo.Templates, uc.Templates)
+				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in order: %v", userInfo.Templates, uc.Templates))
+			}
+		} else if templatesMatch == "no" {
+			if missing, ok := checkTemplatesAnyOrder(userInfo.Templates, uc.Templates); !ok {
+				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in any order: %v\n\t* Missing: %v", userInfo.Templates, uc.Templates, missing))
 			}
 		} else {
-			if missing, ok := checkTemplatesAnyOrder(userInfo.Templates, uc.Templates); !ok {
-				return fmt.Errorf("%s has incorrect templates:\n- Has:   %v\n+Wants in any order: %v\n  Missing: %v", userInfo.User, userInfo.Templates, uc.Templates, missing)
+			if !checkTemplatesExactMatch(userInfo.Templates, uc.Templates) {
+				errs = append(errs, fmt.Sprintf("WRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants exactly: %v", userInfo.Templates, uc.Templates))
 			}
 		}
 	}
 
 	// Check tags
 	if uc.Tags != nil {
-		if opts.TagsExactMatch {
-			if wrong, missing, extra, ok := checkTagsExactMatch(userInfo.Tags, uc.fullTags); !ok {
-				return fmt.Errorf("%s has errors on tags:\n%s", userInfo.User, formatTagErrors(wrong, missing, extra))
+		if tagsMatch == "no" {
+			if wrong, missing, ok := checkTags(userInfo.Tags, uc.fullTags); !ok {
+				errs = append(errs, formatTagErrors(wrong, missing, nil))
 			}
 		} else {
-			if wrong, missing, ok := checkTags(userInfo.Tags, uc.fullTags); !ok {
-				return fmt.Errorf("%s has errors on tags:\n%s", userInfo.User, formatTagErrors(wrong, missing, nil))
+			if wrong, missing, extra, ok := checkTagsExactMatch(userInfo.Tags, uc.fullTags); !ok {
+				errs = append(errs, formatTagErrors(wrong, missing, extra))
 			}
 		}
 	}
 
 	// Check perms
 	if uc.Permissions != nil {
-		if opts.PermissionsExactMatch {
-			if wrong, missing, extra, ok := checkPermsExactMatch(userInfo.Tags, uc.fullPermissions); !ok {
-				return fmt.Errorf("%s has errors on permissions:\n%s", userInfo.User, formatPermErrors(wrong, missing, extra))
+		if permissionsMatch == "no" {
+			if wrong, missing, ok := checkPerms(userInfo.Tags, uc.fullPermissions); !ok {
+				errs = append(errs, formatPermErrors(wrong, missing, nil))
 			}
 		} else {
-			if wrong, missing, ok := checkPerms(userInfo.Tags, uc.fullPermissions); !ok {
-				return fmt.Errorf("%s has errors on permissions:\n%s", userInfo.User, formatPermErrors(wrong, missing, nil))
+			if wrong, missing, extra, ok := checkPermsExactMatch(userInfo.Tags, uc.fullPermissions); !ok {
+				errs = append(errs, formatPermErrors(wrong, missing, extra))
 			}
 		}
 	}
 
+	if len(errs) != 0 {
+		return fmt.Errorf("%s has errors:\n\n%s", userInfo.User, strings.Join(errs, "\n"))
+	}
 	return nil
+}
+
+func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) string {
+	ls := []string{}
+	if len(wrong) != 0 {
+		ls = append(ls, "\tWRONG TAGS:\n")
+		for prefix, tagval := range wrong {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v has %v", tag, missing[prefix][tag], value))
+			}
+		}
+		ls = append(ls, "")
+	}
+	if len(missing) != 0 {
+		ls = append(ls, "\tMISSING TAGS:\n")
+		for prefix, tagval := range missing {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				if wrong[prefix] == nil || wrong[prefix][tag] == nil {
+					ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v", tag, value))
+				}
+			}
+			ls = append(ls, "")
+		}
+	}
+	if len(extra) != 0 {
+		ls = append(ls, "\tEXTRA TAGS:\n")
+		for prefix, tagval := range extra {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				ls = append(ls, fmt.Sprintf("\t\t- %s: has %v", tag, value))
+			}
+			ls = append(ls, "")
+		}
+	}
+	return strings.Join(ls, "\n")
+}
+
+func formatPermErrors(wrong, missing, extra map[string]map[string]interface{}) string {
+	ls := []string{}
+	if len(wrong) != 0 {
+		ls = append(ls, "\tWRONG PERMISSIONS:\n")
+		for prefix, tagval := range wrong {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v has %v", tag, ei.N(missing[prefix][tag]).BoolZ(), ei.N(value).BoolZ()))
+			}
+			ls = append(ls, "")
+		}
+	}
+	if len(missing) != 0 {
+		ls = append(ls, "\tMISSING PERMISSIONS:\n")
+		for prefix, tagval := range missing {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				if wrong[prefix] == nil || wrong[prefix][tag] == nil {
+					ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v", tag, ei.N(value).BoolZ()))
+				}
+			}
+			ls = append(ls, "")
+		}
+	}
+	if len(extra) != 0 {
+		ls = append(ls, "\tEXTRA PERMISSIONS:\n")
+		for prefix, tagval := range extra {
+			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
+			for tag, value := range tagval {
+				ls = append(ls, fmt.Sprintf("\t\t- %s: has %v", tag, ei.N(value).BoolZ()))
+			}
+			ls = append(ls, "")
+		}
+	}
+	return strings.Join(ls, "\n")
 }
 
 func checkTemplatesExactMatch(has []string, wants []string) bool {
@@ -278,30 +387,6 @@ func checkTagsWithDeepEqual(has map[string]map[string]interface{}, wants map[str
 	})
 }
 
-func getTagsOnly(tags map[string]map[string]interface{}) map[string]map[string]interface{} {
-	tagsOnly := map[string]map[string]interface{}{}
-	for prefix, tagval := range tags {
-		for tag, value := range tagval {
-			if !strings.HasPrefix(tag, "@") {
-				addPrefTagVal(tagsOnly, prefix, tag, value)
-			}
-		}
-	}
-	return tagsOnly
-}
-
-func getPermsOnly(tags map[string]map[string]interface{}) map[string]map[string]interface{} {
-	permsOnly := map[string]map[string]interface{}{}
-	for prefix, tagval := range tags {
-		for tag, value := range tagval {
-			if strings.HasPrefix(tag, "@") {
-				addPrefTagVal(permsOnly, prefix, tag, value)
-			}
-		}
-	}
-	return permsOnly
-}
-
 func checkTagsWithFunc(has map[string]map[string]interface{}, wants map[string]map[string]interface{}, f func(hval interface{}, wval interface{}) bool) (map[string]map[string]interface{}, map[string]map[string]interface{}, map[string]map[string]interface{}) {
 	wrong := map[string]map[string]interface{}{}
 	missing := map[string]map[string]interface{}{}
@@ -332,6 +417,30 @@ func checkTagsWithFunc(has map[string]map[string]interface{}, wants map[string]m
 	return wrong, missing, extra
 }
 
+func getTagsOnly(tags map[string]map[string]interface{}) map[string]map[string]interface{} {
+	tagsOnly := map[string]map[string]interface{}{}
+	for prefix, tagval := range tags {
+		for tag, value := range tagval {
+			if !strings.HasPrefix(tag, "@") {
+				addPrefTagVal(tagsOnly, prefix, tag, value)
+			}
+		}
+	}
+	return tagsOnly
+}
+
+func getPermsOnly(tags map[string]map[string]interface{}) map[string]map[string]interface{} {
+	permsOnly := map[string]map[string]interface{}{}
+	for prefix, tagval := range tags {
+		for tag, value := range tagval {
+			if strings.HasPrefix(tag, "@") {
+				addPrefTagVal(permsOnly, prefix, tag, value)
+			}
+		}
+	}
+	return permsOnly
+}
+
 func addPrefTagVal(dest map[string]map[string]interface{}, prefix string, tag string, val interface{}) {
 	if dest == nil {
 		dest = map[string]map[string]interface{}{}
@@ -339,6 +448,14 @@ func addPrefTagVal(dest map[string]map[string]interface{}, prefix string, tag st
 	if _, ok := dest[prefix]; !ok {
 		dest[prefix] = map[string]interface{}{}
 	}
+	sval, err := json.Marshal(val)
+	if err != nil {
+		panic(err.Error())
+	}
+	if err = json.Unmarshal(sval, &val); err != nil {
+		panic(err.Error())
+	}
+
 	dest[prefix][tag] = val
 }
 
@@ -350,78 +467,4 @@ func addPrefPermVal(dest map[string]map[string]interface{}, prefix string, perm 
 		dest[prefix] = map[string]interface{}{}
 	}
 	dest[prefix][perm] = val
-}
-
-func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) string {
-	ls := []string{}
-	if len(wrong) != 0 {
-		ls = append(ls, "\tWRONG TAGS:\n")
-		for prefix, tagval := range wrong {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v has %v", tag, missing[prefix][tag], value))
-			}
-		}
-		ls = append(ls, "")
-	}
-	if len(missing) != 0 {
-		ls = append(ls, "\tMISSING TAGS:\n")
-		for prefix, tagval := range missing {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				if wrong[prefix] == nil || wrong[prefix][tag] == nil {
-					ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v", tag, value))
-				}
-			}
-			ls = append(ls, "")
-		}
-	}
-	if len(extra) != 0 {
-		ls = append(ls, "\tEXTRA TAGS:\n")
-		for prefix, tagval := range extra {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				ls = append(ls, fmt.Sprintf("\t\t- %s: has %v", tag, value))
-			}
-			ls = append(ls, "")
-		}
-	}
-	return strings.Join(ls, "\n")
-}
-
-func formatPermErrors(wrong, missing, extra map[string]map[string]interface{}) string {
-	ls := []string{}
-	if len(wrong) != 0 {
-		ls = append(ls, "\tWRONG PERMISSIONS:\n")
-		for prefix, tagval := range wrong {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v has %v", tag, ei.N(missing[prefix][tag]).BoolZ(), ei.N(value).BoolZ()))
-			}
-			ls = append(ls, "")
-		}
-	}
-	if len(missing) != 0 {
-		ls = append(ls, "\tMISSING PERMISSIONS:\n")
-		for prefix, tagval := range missing {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				if wrong[prefix] == nil || wrong[prefix][tag] == nil {
-					ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v", tag, ei.N(value).BoolZ()))
-				}
-			}
-			ls = append(ls, "")
-		}
-	}
-	if len(extra) != 0 {
-		ls = append(ls, "\tEXTRA PERMISSIONS:\n")
-		for prefix, tagval := range extra {
-			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
-			for tag, value := range tagval {
-				ls = append(ls, fmt.Sprintf("\t\t- %s: has %v", tag, ei.N(value).BoolZ()))
-			}
-			ls = append(ls, "")
-		}
-	}
-	return strings.Join(ls, "\n")
 }

@@ -1,8 +1,7 @@
 package main
 
 import (
-	"log"
-
+	"fmt"
 	"os"
 
 	"github.com/nayarsystems/nxgo"
@@ -12,7 +11,7 @@ import (
 func main() {
 	checks := []*nuc.UsersCheck{
 		{
-			User:      "test.myuser",
+			Prefix:    "test.myuser",
 			Templates: []string{"test.mytemplate"},
 			Permissions: &nuc.Permissions{
 				ByPrefix: nuc.P{
@@ -47,26 +46,34 @@ func main() {
 		},
 	}
 
+	if len(os.Args) < 4 {
+		fmt.Printf("Usage: %s <nexus> <user> <pass>\n", os.Args[0])
+		return
+	}
+
 	nxconn, err := nxgo.Dial(os.Args[1], nil)
 	if err != nil {
-		log.Fatalf(err.Error())
+		fmt.Println(err.Error())
+		return
 	}
 	defer nxconn.Close()
 
 	_, err = nxconn.Login(os.Args[2], os.Args[3])
 	if err != nil {
-		log.Fatalf(err.Error())
+		fmt.Println(err.Error())
+		return
 	}
 
 	for _, c := range checks {
-		checkErr, err := c.Check(nxconn, &nuc.CheckOpts{
-			TemplatesExactMatch: true,
-		})
+		checkErr, err := c.Check(nxconn)
 		if err != nil {
-			log.Fatalf(err.Error())
+			fmt.Println(err.Error())
+			return
 		}
 		if checkErr != nil {
-			log.Printf(checkErr.Error())
+			fmt.Println(checkErr.Error())
+		} else {
+			fmt.Printf("User %s passed all checks\n", c.Prefix)
 		}
 	}
 }
