@@ -15,16 +15,16 @@ import (
 )
 
 type UsersCheck struct {
-	nexusConn             *nx.NexusConn
-	Prefix                string       `json:"prefix"`
-	CreateMissing         bool         `json:"createMissing"`
-	OnlySubUsers          bool         `json:"onlySubUsers"`
-	Templates             []string     `json:"templates"`
-	AllowExtraTemplates   bool         `json:"allowExtraTemplates"`
-	Permissions           *Permissions `json:"permissions"`
-	AllowExtraPermissions bool         `json:"allowExtraPermissions"`
-	Tags                  *Tags        `json:"tags"`
-	AllowExtraTags        bool         `json:"allowExtraTags"`
+	nexusConn           *nx.NexusConn
+	Prefix              string       `json:"prefix"`
+	CreateMissing       bool         `json:"createMissing"`
+	OnlySubUsers        bool         `json:"onlySubUsers"`
+	Templates           []string     `json:"templates"`
+	AllowExtraTemplates bool         `json:"allowExtraTemplates"`
+	Permissions         *Permissions `json:"permissions"`
+	NoExtraPermissions  bool         `json:"noExtraPermissions"`
+	Tags                *Tags        `json:"tags"`
+	NoExtraTags         bool         `json:"noExtraTags"`
 
 	fullPermissions T
 	fullTags        T
@@ -45,11 +45,11 @@ type Tags struct {
 type T map[string]map[string]interface{}
 
 type CheckOpts struct {
-	apply                 bool
-	AllowExtraTemplates   bool `json:"allowExtraTemplates"`
-	AllowExtraPermissions bool `json:"allowExtraPermissions"`
-	AllowExtraTags        bool `json:"allowExtraTags"`
-	CreateMissing         bool `json:"createMissing"`
+	apply               bool
+	AllowExtraTemplates bool `json:"allowExtraTemplates"`
+	NoExtraPermissions  bool `json:"noExtraPermissions"`
+	NoExtraTags         bool `json:"noExtraPermissions"`
+	CreateMissing       bool `json:"createMissing"`
 }
 
 type userChecksFromFile struct {
@@ -151,27 +151,32 @@ func checkApplyNexusConn(apply bool, checks []*UsersCheck, nxconn *nx.NexusConn,
 
 	if apply {
 		for _, check := range checks {
-			checkErr, err := check.apply(nxconn, opts...)
-			if checkErr != nil {
-				outs = append(outs, checkErr.Error())
+			hasCheckErr, checkOut, err := check.apply(nxconn, opts...)
+			if checkOut != "" {
+				outs = append(outs, checkOut)
 			}
 			if err != nil {
 				outs = append(outs, err.Error())
 				errs = append(errs, err.Error())
-			} else if checkErr == nil {
+			} else if !hasCheckErr {
 				outs = append(outs, fmt.Sprintf("%s passed all checks", check.Prefix))
 			}
 		}
 	} else {
 		for _, check := range checks {
-			checkErr, err := check.check(nxconn, opts...)
+			hasCheckErr, checkOut, err := check.check(nxconn, opts...)
 			if err != nil {
 				outs = append(outs, err.Error())
 				errs = append(errs, err.Error())
-			} else if checkErr != nil {
-				outs = append(outs, checkErr.Error())
-				errs = append(errs, checkErr.Error())
+			} else if hasCheckErr {
+				if checkOut != "" {
+					outs = append(outs, checkOut)
+					errs = append(errs, checkOut)
+				}
 			} else {
+				if checkOut != "" {
+					outs = append(outs, checkOut)
+				}
 				outs = append(outs, fmt.Sprintf("%s passed all checks", check.Prefix))
 			}
 		}
@@ -206,7 +211,7 @@ func getUserChecksFromFile(file string) ([]*UsersCheck, *CheckOpts, string, stri
 	return ucff.Checks, ucff.Opts, ucff.NexusHost, ucff.NexusUser, ucff.NexusPass, nil
 }
 
-func (uc *UsersCheck) check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
+func (uc *UsersCheck) check(nc *nx.NexusConn, opts ...*CheckOpts) (bool, string, error) {
 	opt := &CheckOpts{}
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -216,7 +221,7 @@ func (uc *UsersCheck) check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error)
 	return uc.checkApply(opt)
 }
 
-func (uc *UsersCheck) apply(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
+func (uc *UsersCheck) apply(nc *nx.NexusConn, opts ...*CheckOpts) (bool, string, error) {
 	opt := &CheckOpts{}
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -264,7 +269,7 @@ func (uc *UsersCheck) init(nc *nx.NexusConn) {
 	}
 }
 
-func (uc *UsersCheck) checkApply(opts *CheckOpts) (error, error) {
+func (uc *UsersCheck) checkApply(opts *CheckOpts) (bool, string, error) {
 	listOpts := &nx.ListOpts{}
 	if !uc.OnlySubUsers {
 		listOpts.LimitByDepth = true
@@ -273,20 +278,24 @@ func (uc *UsersCheck) checkApply(opts *CheckOpts) (error, error) {
 
 	users, err := uc.nexusConn.UserList(uc.Prefix, 0, 0, listOpts)
 	if err != nil {
-		return nil, fmt.Errorf("Error listing users on %s: %s", uc.Prefix, err.Error())
+		return false, "", fmt.Errorf("Error listing users on %s: %s", uc.Prefix, err.Error())
 	}
 
-	checkErrs := []string{}
+	hasCheckErr := false
+	checkOuts := []string{}
 
 	done := 0
 	for _, user := range users {
 		if uc.OnlySubUsers == (user.User != uc.Prefix) {
-			checkErr, applyErr := uc.checkUser(&user, opts)
-			if checkErr != nil {
-				checkErrs = append(checkErrs, checkErr.Error())
+			checkOk, checkOut, applyErr := uc.checkUser(&user, opts)
+			if !checkOk {
+				hasCheckErr = true
+			}
+			if checkOut != "" {
+				checkOuts = append(checkOuts, checkOut)
 			}
 			if opts.apply && applyErr != nil {
-				return fmt.Errorf(strings.Join(checkErrs, "\n")), applyErr
+				return hasCheckErr, strings.Join(checkOuts, "\n"), applyErr
 			}
 			done++
 		}
@@ -296,30 +305,28 @@ func (uc *UsersCheck) checkApply(opts *CheckOpts) (error, error) {
 		if opts.apply && !uc.OnlySubUsers && (opts.CreateMissing || uc.CreateMissing) {
 			crOut := fmt.Sprintf("%s does not exist", uc.Prefix)
 			if _, err = uc.nexusConn.UserCreate(uc.Prefix, randomPass(12)); err != nil {
-				return fmt.Errorf(crOut), fmt.Errorf("Error creating user %s: %s", uc.Prefix, err.Error())
+				return true, crOut, fmt.Errorf("Error creating user %s: %s", uc.Prefix, err.Error())
 			}
-			out, err := uc.checkApply(opts)
-			return fmt.Errorf("%s\n%s created\n%s", crOut, uc.Prefix, out), err
+			ok, out, err := uc.checkApply(opts)
+			return ok, fmt.Sprintf("%s\n%s created\n%s", crOut, uc.Prefix, out), err
 		} else {
-			return nil, fmt.Errorf("Error listing users on %s: no users found", uc.Prefix)
+			return true, "", fmt.Errorf("Error listing users on %s: no users found", uc.Prefix)
 		}
 	}
 
-	if len(checkErrs) != 0 {
-		return fmt.Errorf(strings.Join(checkErrs, "\n")), nil
-	}
-	return nil, nil
+	return hasCheckErr, strings.Join(checkOuts, "\n"), nil
 }
 
-func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (error, error) {
+func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (bool, string, error) {
 	// Check templates
 	var applyErr error
-	outs := []string{}
+	errOuts := []string{}
+	warnOuts := []string{}
 
 	if uc.Templates != nil {
 		if opts.AllowExtraTemplates || uc.AllowExtraTemplates {
 			if missing, ok := checkTemplatesOrderMatch(userInfo.Templates, uc.Templates); !ok {
-				outs = append(outs, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in order: %v\n", userInfo.Templates, uc.Templates))
+				errOuts = append(errOuts, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants in order: %v\n", userInfo.Templates, uc.Templates))
 				if opts.apply {
 					if err := applyTemplates(uc.nexusConn, userInfo, append(userInfo.Templates, missing...)); err != nil {
 						applyErr = fmt.Errorf("Error applying templates to %s: %s", userInfo.User, err.Error())
@@ -328,7 +335,7 @@ func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (error, 
 			}
 		} else {
 			if !checkTemplatesExactMatch(userInfo.Templates, uc.Templates) {
-				outs = append(outs, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants exactly: %v\n", userInfo.Templates, uc.Templates))
+				errOuts = append(errOuts, fmt.Sprintf("\tWRONG TEMPLATES:\n\n\t* Has: %v\n\t* Wants exactly: %v\n", userInfo.Templates, uc.Templates))
 				if opts.apply {
 					if err := applyTemplates(uc.nexusConn, userInfo, uc.Templates); err != nil {
 						applyErr = fmt.Errorf("Error applying templates to %s: %s", userInfo.User, err.Error())
@@ -341,60 +348,62 @@ func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (error, 
 
 	// Check tags
 	if uc.Tags != nil {
-		if opts.AllowExtraTags || uc.AllowExtraTags {
-			if wrong, missing, ok := checkTags(userInfo.Tags, uc.fullTags); !ok {
-				outs = append(outs, formatTagErrors(wrong, missing, nil))
-				if opts.apply && applyErr == nil {
-					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
-						applyErr = fmt.Errorf("Error applying tags to %s: %s", userInfo.User, err.Error())
-					}
-				}
-			}
-		} else {
+		if opts.NoExtraTags || uc.NoExtraTags {
 			if wrong, missing, extra, ok := checkTagsExactMatch(userInfo.Tags, uc.fullTags); !ok {
-				outs = append(outs, formatTagErrors(wrong, missing, extra))
+				errOuts = append(errOuts, formatTagErrors(wrong, missing, extra))
 				if opts.apply && applyErr == nil {
 					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, extra); err != nil {
 						applyErr = fmt.Errorf("Error applying tags to %s: %s", userInfo.User, err.Error())
 					}
 				}
+			}
+		} else {
+			if wrong, missing, extra, ok := checkTags(userInfo.Tags, uc.fullTags); !ok {
+				errOuts = append(errOuts, formatTagErrors(wrong, missing, nil))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
+						applyErr = fmt.Errorf("Error applying tags to %s: %s", userInfo.User, err.Error())
+					}
+				}
+			} else if len(extra) != 0 {
+				warnOuts = append(warnOuts, formatTagErrors(nil, nil, extra))
 			}
 		}
 	}
 
 	// Check perms
 	if uc.Permissions != nil {
-		if opts.AllowExtraPermissions || uc.AllowExtraPermissions {
-			if wrong, missing, ok := checkPerms(userInfo.Tags, uc.fullPermissions); !ok {
-				outs = append(outs, formatPermErrors(wrong, missing, nil))
-				if opts.apply && applyErr == nil {
-					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
-						applyErr = fmt.Errorf("Error applying permissions to %s: %s", userInfo.User, err.Error())
-					}
-				}
-			}
-		} else {
+		if opts.NoExtraPermissions || uc.NoExtraPermissions {
 			if wrong, missing, extra, ok := checkPermsExactMatch(userInfo.Tags, uc.fullPermissions); !ok {
-				outs = append(outs, formatPermErrors(wrong, missing, extra))
+				errOuts = append(errOuts, formatPermErrors(wrong, missing, extra))
 				if opts.apply && applyErr == nil {
 					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, extra); err != nil {
 						applyErr = fmt.Errorf("Error applying permissions to %s: %s", userInfo.User, err.Error())
 					}
 				}
 			}
+		} else {
+			if wrong, missing, extra, ok := checkPerms(userInfo.Tags, uc.fullPermissions); !ok {
+				errOuts = append(errOuts, formatPermErrors(wrong, missing, nil))
+				if opts.apply && applyErr == nil {
+					if err := applyTags(uc.nexusConn, userInfo, wrong, missing, nil); err != nil {
+						applyErr = fmt.Errorf("Error applying permissions to %s: %s", userInfo.User, err.Error())
+					}
+				}
+			} else if len(extra) != 0 {
+				warnOuts = append(warnOuts, formatPermErrors(nil, nil, extra))
+			}
 		}
 	}
 
-	if len(outs) == 0 {
-		return nil, nil
-	} else if !opts.apply {
-		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), nil
-	} else if applyErr != nil {
-		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), applyErr
-	} else {
-		outs = append(outs, fmt.Sprintf("%s all errors fixed", userInfo.User))
-		return fmt.Errorf("%s check errors:\n\n%s", userInfo.User, strings.Join(outs, "\n")), nil
+	out := ""
+	if len(errOuts) != 0 {
+		out += fmt.Sprintf("%s check errors:\n\n%s", userInfo.User, strings.Join(errOuts, "\n"))
 	}
+	if len(warnOuts) != 0 {
+		out += fmt.Sprintf("%s check warnings:\n\n%s", userInfo.User, strings.Join(warnOuts, "\n"))
+	}
+	return len(errOuts) == 0, out, applyErr
 }
 
 func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) string {
@@ -577,10 +586,10 @@ func checkTagsExactMatch(has map[string]map[string]interface{}, wants map[string
 	return wrong, missing, extra, (len(missing) == 0 && len(extra) == 0)
 }
 
-func checkTags(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, bool) {
+func checkTags(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, map[string]map[string]interface{}, bool) {
 	hasTags := getTagsOnly(has)
-	wrong, missing, _ := checkTagsWithDeepEqual(hasTags, wants)
-	return wrong, missing, len(missing) == 0
+	wrong, missing, extra := checkTagsWithDeepEqual(hasTags, wants)
+	return wrong, missing, extra, len(missing) == 0
 }
 
 func checkPermsExactMatch(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, map[string]map[string]interface{}, bool) {
@@ -589,10 +598,10 @@ func checkPermsExactMatch(has map[string]map[string]interface{}, wants map[strin
 	return wrong, missing, extra, (len(missing) == 0 && len(extra) == 0)
 }
 
-func checkPerms(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, bool) {
+func checkPerms(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, map[string]map[string]interface{}, bool) {
 	hasPerms := getPermsOnly(has)
-	wrong, missing, _ := checkTagsAsPerms(hasPerms, wants)
-	return wrong, missing, len(missing) == 0
+	wrong, missing, extra := checkTagsAsPerms(hasPerms, wants)
+	return wrong, missing, extra, len(missing) == 0
 }
 
 func checkTagsAsPerms(has map[string]map[string]interface{}, wants map[string]map[string]interface{}) (map[string]map[string]interface{}, map[string]map[string]interface{}, map[string]map[string]interface{}) {
