@@ -3,11 +3,14 @@ package nxusercheck
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"reflect"
 	"strings"
 
 	"github.com/jaracil/ei"
 
+	"github.com/nayarsystems/nxgo"
 	nx "github.com/nayarsystems/nxgo/nxcore"
 )
 
@@ -42,72 +45,224 @@ type T map[string]map[string]interface{}
 
 type CheckOpts struct {
 	apply                 bool
-	AllowExtraTemplates   bool
-	AllowExtraPermissions bool
-	AllowExtraTags        bool
+	AllowExtraTemplates   bool `json:"allowExtraTemplates"`
+	AllowExtraPermissions bool `json:"allowExtraPermissions"`
+	AllowExtraTags        bool `json:"allowExtraTags"`
 }
 
-func (uc *UsersCheck) Check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
+type userChecksFromFile struct {
+	Checks    []*UsersCheck `json:"checks"`
+	Opts      *CheckOpts    `json:"opts"`
+	NexusHost string        `json:"nexusHost"`
+	NexusUser string        `json:"nexusUser"`
+	NexusPass string        `json:"nexusPass"`
+}
+
+func CheckFile(file string, opts ...*CheckOpts) (string, error) {
+	return checkApplyFile(false, file, opts...)
+}
+
+func ApplyFile(file string, opts ...*CheckOpts) (string, error) {
+	return checkApplyFile(true, file, opts...)
+}
+
+func CheckFileNexus(file string, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	return checkApplyFileNexus(false, file, nexusHost, nexusUser, nexusPass, opts...)
+}
+
+func ApplyFileNexus(file string, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	return checkApplyFileNexus(true, file, nexusHost, nexusUser, nexusPass, opts...)
+}
+
+func CheckFileNexusConn(file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	return checkApplyFileNexusConn(false, file, nxconn, opts...)
+}
+
+func AppplyFileNexusConn(file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	return checkApplyFileNexusConn(true, file, nxconn, opts...)
+}
+
+func Check(checks []*UsersCheck, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	return checkApply(false, checks, nexusHost, nexusUser, nexusPass, opts...)
+}
+
+func Apply(checks []*UsersCheck, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	return checkApply(true, checks, nexusHost, nexusUser, nexusPass, opts...)
+}
+
+func CheckNexusConn(checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	return checkApplyNexusConn(false, checks, nxconn, opts...)
+}
+
+func AppplyNexusConn(checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	return checkApplyNexusConn(true, checks, nxconn, opts...)
+}
+
+func checkApplyFile(apply bool, file string, opts ...*CheckOpts) (string, error) {
+	checks, opt, host, user, pass, err := getUserChecksFromFile(file)
+	if err != nil {
+		return err.Error(), err
+	}
+	return checkApply(apply, checks, host, user, pass, opt)
+}
+
+func checkApplyFileNexus(apply bool, file string, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	checks, opt, _, _, _, err := getUserChecksFromFile(file)
+	if err != nil {
+		return err.Error(), err
+	}
+	return checkApply(apply, checks, nexusHost, nexusUser, nexusPass, opt)
+}
+
+func checkApplyFileNexusConn(apply bool, file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	checks, opt, _, _, _, err := getUserChecksFromFile(file)
+	if err != nil {
+		return err.Error(), err
+	}
+	return checkApplyNexusConn(apply, checks, nxconn, opt)
+}
+
+func getNexusConn(nexusHost string, nexusUser string, nexusPass string) (*nx.NexusConn, error) {
+	nxconn, err := nxgo.Dial(nexusHost, nil)
+	if err != nil {
+		return nil, err
+	}
+	_, err = nxconn.Login(nexusUser, nexusPass)
+	if err != nil {
+		return nil, err
+	}
+	return nxconn, nil
+}
+
+func checkApply(apply bool, checks []*UsersCheck, nexusHost string, nexusUser string, nexusPass string, opts ...*CheckOpts) (string, error) {
+	nxconn, err := getNexusConn(nexusHost, nexusUser, nexusPass)
+	if err != nil {
+		return err.Error(), err
+	}
+	defer nxconn.Close()
+	return checkApplyNexusConn(apply, checks, nxconn, opts...)
+}
+
+func checkApplyNexusConn(apply bool, checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+	outs := []string{}
+	errs := []string{}
+
+	if apply {
+		for _, check := range checks {
+			checkErr, err := check.apply(nxconn, opts...)
+			if checkErr != nil {
+				outs = append(outs, checkErr.Error())
+			}
+			if err != nil {
+				outs = append(outs, err.Error())
+				errs = append(errs, err.Error())
+			} else if checkErr == nil {
+				outs = append(outs, fmt.Sprintf("%s passed all checks", check.Prefix))
+			}
+		}
+	} else {
+		for _, check := range checks {
+			checkErr, err := check.check(nxconn, opts...)
+			if err != nil {
+				outs = append(outs, err.Error())
+				errs = append(errs, err.Error())
+			} else if checkErr != nil {
+				outs = append(outs, checkErr.Error())
+				errs = append(errs, checkErr.Error())
+			} else {
+				outs = append(outs, fmt.Sprintf("%s passed all checks", check.Prefix))
+			}
+		}
+	}
+
+	if len(errs) != 0 {
+		return strings.Join(outs, "\n"), fmt.Errorf(strings.Join(errs, "\n"))
+	} else {
+		outs = append(outs, fmt.Sprintf("%d checks passed successfully", len(checks)))
+		return strings.Join(outs, "\n"), nil
+	}
+}
+
+func getUserChecksFromFile(file string) ([]*UsersCheck, *CheckOpts, string, string, string, error) {
+	jsonFile, err := os.Open(file)
+	if err != nil {
+		return nil, nil, "", "", "", fmt.Errorf("Error opening file %s: %s", file, err.Error())
+	}
+	defer jsonFile.Close()
+	byteValue, err := ioutil.ReadAll(jsonFile)
+	if err != nil {
+		return nil, nil, "", "", "", fmt.Errorf("Error reading file %s: %s", file, err.Error())
+	}
+	var ucff *userChecksFromFile
+	err = json.Unmarshal(byteValue, &ucff)
+	if err != nil {
+		return nil, nil, "", "", "", fmt.Errorf("Error unmarshaling json from file %s: %s", file, err.Error())
+	}
+	if ucff.Opts == nil {
+		ucff.Opts = &CheckOpts{}
+	}
+	return ucff.Checks, ucff.Opts, ucff.NexusHost, ucff.NexusUser, ucff.NexusPass, nil
+}
+
+func (uc *UsersCheck) check(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
 	opt := &CheckOpts{}
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
-
 	uc.init(nc)
-
 	opt.apply = false
-
-	return uc.check(opt)
+	return uc.checkApply(opt)
 }
 
-func (uc *UsersCheck) Apply(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
+func (uc *UsersCheck) apply(nc *nx.NexusConn, opts ...*CheckOpts) (error, error) {
 	opt := &CheckOpts{}
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
-
 	uc.init(nc)
-
 	opt.apply = true
-
-	return uc.check(opt)
+	return uc.checkApply(opt)
 }
 
 func (uc *UsersCheck) init(nc *nx.NexusConn) {
 	uc.nexusConn = nc
 	uc.fullPermissions = map[string]map[string]interface{}{}
 	uc.fullTags = map[string]map[string]interface{}{}
-	for prefix, perms := range uc.Permissions.ByPrefix {
-		for perm, value := range perms {
-			if strings.HasPrefix(perm, "@") {
-				addPrefPermVal(uc.fullPermissions, prefix, perm, value)
+	if uc.Permissions != nil {
+		for prefix, perms := range uc.Permissions.ByPrefix {
+			for perm, value := range perms {
+				if strings.HasPrefix(perm, "@") {
+					addPrefPermVal(uc.fullPermissions, prefix, perm, value)
+				}
+			}
+		}
+		for perm, prefixes := range uc.Permissions.OnPrefixes {
+			for prefix, value := range prefixes {
+				if strings.HasPrefix(perm, "@") {
+					addPrefPermVal(uc.fullPermissions, prefix, perm, value)
+				}
 			}
 		}
 	}
-	for perm, prefixes := range uc.Permissions.OnPrefixes {
-		for prefix, value := range prefixes {
-			if strings.HasPrefix(perm, "@") {
-				addPrefPermVal(uc.fullPermissions, prefix, perm, value)
+	if uc.Tags != nil {
+		for prefix, tags := range uc.Tags.ByPrefix {
+			for tag, value := range tags {
+				if !strings.HasPrefix(tag, "@") {
+					addPrefTagVal(uc.fullTags, prefix, tag, value)
+				}
 			}
 		}
-	}
-	for prefix, tags := range uc.Tags.ByPrefix {
-		for tag, value := range tags {
-			if !strings.HasPrefix(tag, "@") {
-				addPrefTagVal(uc.fullTags, prefix, tag, value)
-			}
-		}
-	}
-	for tag, prefixes := range uc.Tags.OnPrefixes {
-		for prefix, value := range prefixes {
-			if !strings.HasPrefix(tag, "@") {
-				addPrefTagVal(uc.fullTags, prefix, tag, value)
+		for tag, prefixes := range uc.Tags.OnPrefixes {
+			for prefix, value := range prefixes {
+				if !strings.HasPrefix(tag, "@") {
+					addPrefTagVal(uc.fullTags, prefix, tag, value)
+				}
 			}
 		}
 	}
 }
 
-func (uc *UsersCheck) check(opts *CheckOpts) (error, error) {
+func (uc *UsersCheck) checkApply(opts *CheckOpts) (error, error) {
 	listOpts := &nx.ListOpts{}
 	if !uc.OnlySubUsers {
 		listOpts.LimitByDepth = true
@@ -238,6 +393,9 @@ func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) st
 		for prefix, tagval := range wrong {
 			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
 			for tag, value := range tagval {
+				if jsval, err := json.Marshal(value); err == nil {
+					value = string(jsval)
+				}
 				ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v has %v", tag, missing[prefix][tag], value))
 			}
 		}
@@ -249,6 +407,9 @@ func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) st
 			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
 			for tag, value := range tagval {
 				if wrong[prefix] == nil || wrong[prefix][tag] == nil {
+					if jsval, err := json.Marshal(value); err == nil {
+						value = string(jsval)
+					}
 					ls = append(ls, fmt.Sprintf("\t\t- %s: wants %v", tag, value))
 				}
 			}
@@ -260,6 +421,9 @@ func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) st
 		for prefix, tagval := range extra {
 			ls = append(ls, fmt.Sprintf("\t* %s", prefix))
 			for tag, value := range tagval {
+				if jsval, err := json.Marshal(value); err == nil {
+					value = string(jsval)
+				}
 				ls = append(ls, fmt.Sprintf("\t\t- %s: has %v", tag, value))
 			}
 			ls = append(ls, "")

@@ -1,0 +1,46 @@
+{
+    "opts": {},
+    "checks": [
+        {
+            "prefix": "test.myuser",
+            "templates": [
+                "test.mytemplate"
+            ],
+            "permissions": {
+                "byPrefix": {
+                    "test.mypath1": {
+                        "@task.push": true,
+                        "@task.pull": true,
+                        "@user.list": true,
+                        "@user.delete": false
+                    }
+                },
+                "onPrefixes": {
+                    "@user.list": {
+                        "test.mypath2": true,
+                        "test.mypath3": true
+                    }
+                }
+            },
+            "tags": {
+                "byPrefix": {
+                    "test.mypath1": {
+                        "tag1": [
+                            "value1",
+                            "value2"
+                        ],
+                        "tag2": 123
+                    }
+                },
+                "onPrefixes": {
+                    "tagA": {
+                        "test.mypath2": {
+                            "a": "b"
+                        },
+                        "test.mypath3": "value"
+                    }
+                }
+            }
+        }
+    ]
+}
