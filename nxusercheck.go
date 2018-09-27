@@ -17,6 +17,7 @@ import (
 type UsersCheck struct {
 	nexusConn             *nx.NexusConn
 	Prefix                string       `json:"prefix"`
+	CreateMissing         bool         `json:"createMissing"`
 	OnlySubUsers          bool         `json:"onlySubUsers"`
 	Templates             []string     `json:"templates"`
 	AllowExtraTemplates   bool         `json:"allowExtraTemplates"`
@@ -48,6 +49,7 @@ type CheckOpts struct {
 	AllowExtraTemplates   bool `json:"allowExtraTemplates"`
 	AllowExtraPermissions bool `json:"allowExtraPermissions"`
 	AllowExtraTags        bool `json:"allowExtraTags"`
+	CreateMissing         bool `json:"createMissing"`
 }
 
 type userChecksFromFile struct {
@@ -78,7 +80,7 @@ func CheckFileNexusConn(file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (
 	return checkApplyFileNexusConn(false, file, nxconn, opts...)
 }
 
-func AppplyFileNexusConn(file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+func ApplyFileNexusConn(file string, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
 	return checkApplyFileNexusConn(true, file, nxconn, opts...)
 }
 
@@ -94,7 +96,7 @@ func CheckNexusConn(checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOp
 	return checkApplyNexusConn(false, checks, nxconn, opts...)
 }
 
-func AppplyNexusConn(checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
+func ApplyNexusConn(checks []*UsersCheck, nxconn *nx.NexusConn, opts ...*CheckOpts) (string, error) {
 	return checkApplyNexusConn(true, checks, nxconn, opts...)
 }
 
@@ -291,7 +293,16 @@ func (uc *UsersCheck) checkApply(opts *CheckOpts) (error, error) {
 	}
 
 	if done == 0 {
-		return nil, fmt.Errorf("Error listing users on %s: no users found", uc.Prefix)
+		if opts.apply && !uc.OnlySubUsers && (opts.CreateMissing || uc.CreateMissing) {
+			crOut := fmt.Sprintf("%s does not exist", uc.Prefix)
+			if _, err = uc.nexusConn.UserCreate(uc.Prefix, randomPass(12)); err != nil {
+				return fmt.Errorf(crOut), fmt.Errorf("Error creating user %s: %s", uc.Prefix, err.Error())
+			}
+			out, err := uc.checkApply(opts)
+			return fmt.Errorf("%s\n%s created\n%s", crOut, uc.Prefix, out), err
+		} else {
+			return nil, fmt.Errorf("Error listing users on %s: no users found", uc.Prefix)
+		}
 	}
 
 	if len(checkErrs) != 0 {
