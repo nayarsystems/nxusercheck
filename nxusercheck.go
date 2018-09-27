@@ -48,7 +48,7 @@ type CheckOpts struct {
 	apply               bool
 	AllowExtraTemplates bool `json:"allowExtraTemplates"`
 	NoExtraPermissions  bool `json:"noExtraPermissions"`
-	NoExtraTags         bool `json:"noExtraPermissions"`
+	NoExtraTags         bool `json:"noExtraTags"`
 	CreateMissing       bool `json:"createMissing"`
 }
 
@@ -396,14 +396,14 @@ func (uc *UsersCheck) checkUser(userInfo *nx.UserInfo, opts *CheckOpts) (bool, s
 		}
 	}
 
-	out := ""
+	out := []string{}
 	if len(errOuts) != 0 {
-		out += fmt.Sprintf("%s check errors:\n\n%s", userInfo.User, strings.Join(errOuts, "\n"))
+		out = append(out, fmt.Sprintf("%s check errors:\n\n%s", userInfo.User, strings.Join(errOuts, "\n")))
 	}
 	if len(warnOuts) != 0 {
-		out += fmt.Sprintf("%s check warnings:\n\n%s", userInfo.User, strings.Join(warnOuts, "\n"))
+		out = append(out, fmt.Sprintf("%s check warnings:\n\n%s", userInfo.User, strings.Join(warnOuts, "\n")))
 	}
-	return len(errOuts) == 0, out, applyErr
+	return len(errOuts) == 0, strings.Join(out, "\n"), applyErr
 }
 
 func formatTagErrors(wrong, missing, extra map[string]map[string]interface{}) string {
