@@ -301,8 +301,8 @@ func (uc *UsersCheck) checkApply(opts *CheckOpts) (bool, string, error) {
 		}
 	}
 
-	if done == 0 {
-		if opts.apply && !uc.OnlySubUsers && (opts.CreateMissing || uc.CreateMissing) {
+	if !uc.OnlySubUsers && done == 0 {
+		if opts.apply && (opts.CreateMissing || uc.CreateMissing) {
 			crOut := fmt.Sprintf("%s does not exist", uc.Prefix)
 			if _, err = uc.nexusConn.UserCreate(uc.Prefix, randomPass(12)); err != nil {
 				return true, crOut, fmt.Errorf("Error creating user %s: %s", uc.Prefix, err.Error())
